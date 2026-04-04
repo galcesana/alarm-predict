@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  alarm-predict:
+    build: .
+    container_name: alarm-predict-bot
+    restart: unless-stopped
+    volumes:
+      # Mount the models and data directories so your trained model 
+      # and telegram subscriber list persist across reboots
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Jerusalem
