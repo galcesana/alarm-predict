@@ -13,14 +13,21 @@ COPY requirements.txt .
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code and pre-trained models
+# Copy source code
 COPY src/ ./src/
 COPY main.py .
-COPY .env .
 
-# We don't copy the models or data directory directly because we want 
-# the container to maintain its own state or use volumes, but we need the dirs
-RUN mkdir -p models data
+# Copy pre-trained model (so the container starts ready to predict)
+COPY models/ ./models/
 
-# The default command runs the live monitor
-CMD ["python", "main.py"]
+# Create data directory
+RUN mkdir -p data
+
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# Run in HTTP server mode (sidecar for Go bot)
+CMD ["python", "main.py", "--serve", "--port", "8000"]

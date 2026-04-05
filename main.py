@@ -91,7 +91,7 @@ def run_test_prediction(model: AlarmPredictor):
         alert_id="test-001",
         category=1,
         category_name="missiles",
-        title="ירי רקטות וטילים",
+        title="⚠️ [TEST] ירי רקטות וטילים — זו בדיקה בלבד",
         description="היכנסו למרחב המוגן",
         cities=simulated_cities,
         timestamp=datetime.now(),
@@ -168,6 +168,18 @@ def main():
         help="Poll the API once and exit"
     )
     parser.add_argument(
+        "--serve", action="store_true",
+        help="Start HTTP prediction server (sidecar mode)"
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0",
+        help="Server host (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000,
+        help="Server port (default: 8000)"
+    )
+    parser.add_argument(
         "--interval", type=float, default=2.0,
         help="Polling interval in seconds (default: 2.0)"
     )
@@ -202,6 +214,20 @@ def main():
             predict_for_event(event, model)
         else:
             print("   No active alert (this is normal in peacetime)")
+        return
+
+    # HTTP server mode (sidecar for Go bot)
+    if args.serve:
+        import uvicorn
+        print(f"\n🌐 Starting HTTP prediction server on {args.host}:{args.port}")
+        print(f"   POST /predict — run ML prediction")
+        print(f"   GET  /health  — health check")
+        uvicorn.run(
+            "src.server:app",
+            host=args.host,
+            port=args.port,
+            log_level="info" if not args.verbose else "debug",
+        )
         return
 
     # Default: live monitoring
