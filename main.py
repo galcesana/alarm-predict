@@ -21,10 +21,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.oref_client import OrefClient, AlertEvent
 from src.model import AlarmPredictor
-from src.predictor import predict_for_event
-from src.event_logger import log_prediction
 from src.tel_aviv_zones import (
     TEL_AVIV_ZONES,
     GUSH_DAN_CITIES,
@@ -82,6 +79,8 @@ def load_model() -> AlarmPredictor:
 
 def run_test_prediction(model: AlarmPredictor):
     """Run a simulated test prediction."""
+    from src.oref_client import AlertEvent
+    from src.predictor import predict_for_event
     print("\n🧪 TEST MODE — Simulating an Iran-scale missile warning\n")
 
     # Simulate a large-scale warning covering Gush Dan
@@ -107,6 +106,9 @@ def run_test_prediction(model: AlarmPredictor):
 
 def run_live_monitor(model: AlarmPredictor, poll_interval: float = 2.0):
     """Start live monitoring of the oref API."""
+    from src.oref_client import OrefClient, AlertEvent
+    from src.predictor import predict_for_event
+    from src.event_logger import log_prediction
     client = OrefClient(poll_interval=poll_interval)
 
     non_tlv_count = 0
@@ -206,6 +208,8 @@ def main():
 
     # Single poll
     if args.poll_once:
+        from src.oref_client import OrefClient
+        from src.predictor import predict_for_event
         print("🔍 Polling oref API once...")
         client = OrefClient()
         event = client.fetch_alerts()

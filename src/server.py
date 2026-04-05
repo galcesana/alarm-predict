@@ -185,7 +185,7 @@ async def predict(req: PredictRequest):
     zones.sort(key=lambda z: -z.probability)
 
     return PredictResponse(
-        predictions={z.zone_he: round(raw_predictions.get(z.zone_he, 0.0), 4)
+        predictions={z.name_he: round(raw_predictions.get(z.name_he, 0.0), 4)
                      for z in TEL_AVIV_ZONES},
         zones=zones,
         features=features,
