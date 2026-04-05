@@ -1,14 +1,14 @@
 """
 Oref Client — polls the Pikud HaOref alert API in real-time.
 
-This module now wraps the official community `pikudhaoref.py` library
-to automatically handle Akamai WAF bypasses, cookies, and HTTP errors 
-that frequently block raw requests.
+Uses the pikudhaoref library's HTTP session to bypass Akamai WAF,
+but polls the raw oref API directly to get Hebrew city names
+(the library translates to English which breaks our matching).
 """
 
+import json
 import time
 import logging
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Callable
@@ -16,6 +16,18 @@ from typing import Optional, Callable
 import pikudhaoref
 
 logger = logging.getLogger(__name__)
+
+OREF_ALERTS_URL = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
+
+ALERT_CATEGORIES = {
+    1: "missiles",
+    2: "uav",
+    3: "earthquake",
+    4: "tsunami",
+    5: "radiological",
+    6: "terrorist",
+    7: "general",
+}
 
 
 @dataclass
@@ -45,110 +57,135 @@ class AlertEvent:
 
 class OrefClient:
     """
-    Polls the Pikud HaOref alert API using the pikudhaoref library.
+    Polls the Pikud HaOref alert API using pikudhaoref's WAF-bypassing
+    HTTP session, but parses the raw JSON ourselves to keep Hebrew names.
     """
 
     def __init__(self, poll_interval: float = 2.0):
         self.poll_interval = poll_interval
-        # Initialize the underlying pikudhaoref client
-        self.client = pikudhaoref.SyncClient(update_interval=poll_interval)
-        
+
+        # Initialize pikudhaoref just to get its WAF-bypassing HTTP session
+        self._piku_client = pikudhaoref.SyncClient(update_interval=poll_interval)
+        self._session = self._piku_client.http.session
+
         # Callback fired when a new alert is detected
         self.on_alert: Optional[Callable[[AlertEvent], None]] = None
 
         # Track the last alert ID to avoid duplicate processing
         self._last_alert_id: Optional[str] = None
         self._running = False
-        
-        # Register the callback in pikudhaoref
-        @self.client.event
-        def on_siren(sirens):
-            if not sirens:
-                return
-            
-            # Group the sirens into an AlertEvent
-            # The library gives us a list of Siren objects, we group them into a single event
-            cities = [siren.city.name for siren in sirens]
-            first_siren = sirens[0]
-            
-            # Approximate the category and title based on the library's data
-            category_mapping = {
-                "Missiles": 1,
-                "UAV": 2,
-                "Earthquake": 3,
-                "Tsunami": 4,
-                "Radiological Event": 5,
-                "Terrorist Infiltration": 6,
-                "General": 7
-            }
-            cat_name = getattr(first_siren, "category", "missiles").lower()
-            cat_id = 1
-            for k, v in category_mapping.items():
-                if k.lower() in cat_name:
-                    cat_id = v
-                    break
-                    
-            event = AlertEvent(
-                alert_id=str(int(time.time())),  # Generate a unique ID
-                category=cat_id,
-                category_name=cat_name,
-                title="התרעת פיקוד העורף", 
-                description=cat_name,
-                cities=cities,
-                timestamp=datetime.now(),
-            )
-            
-            logger.info(
-                f"🚨 NEW ALERT: {event.title} | "
-                f"{event.city_count} cities | "
-                f"cat={event.category_name}"
-            )
-            
-            if self.on_alert:
-                self.on_alert(event)
 
     def fetch_alerts(self) -> Optional[AlertEvent]:
         """
-        Fetch current alerts. 
+        Fetch current alerts from the oref API using the WAF-bypassing session.
+        Returns an AlertEvent with Hebrew city names, or None if no active alert.
         """
-        # The library caches the current sirens, we just return the active ones
-        sirens = self.client.current_sirens
-        if not sirens:
+        try:
+            response = self._session.get(OREF_ALERTS_URL, timeout=5)
+            response.raise_for_status()
+
+            text = response.text.strip()
+            if not text or text == "null":
+                return None
+
+            # Strip BOM if present
+            text = text.lstrip("\ufeff")
+
+            # Akamai HTML challenge — skip silently
+            if text.startswith("<html") or text.startswith("<!DOC"):
+                logger.debug("Received HTML challenge, skipping")
+                return None
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                logger.debug(f"Non-JSON response, skipping")
+                return None
+
+            # Handle both single object and array responses
+            if isinstance(data, list):
+                if not data:
+                    return None
+                data = data[0]
+
+            if not isinstance(data, dict):
+                return None
+
+            # Extract fields — these come in Hebrew from the raw API
+            alert_id = str(data.get("id", ""))
+            category = data.get("cat", 0)
+            title = data.get("title", "")
+            desc = data.get("desc", "")
+            cities_raw = data.get("data", [])
+
+            if isinstance(cities_raw, str):
+                cities = [c.strip() for c in cities_raw.split(",") if c.strip()]
+            elif isinstance(cities_raw, list):
+                cities = [str(c).strip() for c in cities_raw if c]
+            else:
+                cities = []
+
+            if not cities:
+                return None
+
+            return AlertEvent(
+                alert_id=alert_id,
+                category=category,
+                category_name=ALERT_CATEGORIES.get(category, f"unknown-{category}"),
+                title=title,
+                description=desc,
+                cities=cities,
+                timestamp=datetime.now(),
+                raw_data=data,
+            )
+
+        except Exception as e:
+            logger.debug(f"Fetch error: {e}")
             return None
-            
-        cities = [siren.city.name for siren in sirens]
-        cat_name = getattr(sirens[0], "category", "missiles").lower()
-        
-        return AlertEvent(
-            alert_id=str(int(time.time())),
-            category=1,
-            category_name=cat_name,
-            title="התרעת פיקוד העורף",
-            description=cat_name,
-            cities=cities,
-            timestamp=datetime.now(),
-        )
 
     def poll_once(self) -> Optional[AlertEvent]:
-        """Support standard polling API for backwards compat."""
-        # The pikudhaoref client automatically polls in a background thread
-        # when we instantiate it/add events, but here we manually fetch
-        return self.fetch_alerts()
+        """
+        Poll once and fire callback if new alert detected.
+        Returns the alert event if new, None otherwise.
+        """
+        event = self.fetch_alerts()
+
+        if event is None:
+            if self._last_alert_id is not None:
+                logger.debug("Alert cleared")
+                self._last_alert_id = None
+            return None
+
+        if event.alert_id == self._last_alert_id:
+            return None  # Same alert, already processed
+
+        # New alert!
+        self._last_alert_id = event.alert_id
+        logger.info(
+            f"🚨 NEW ALERT: {event.title} | "
+            f"{event.city_count} cities | "
+            f"cat={event.category_name}"
+        )
+
+        if self.on_alert:
+            self.on_alert(event)
+
+        return event
 
     def start(self):
         """Start the polling loop (blocking)."""
         self._running = True
         logger.info(
-            f"Starting oref alert monitor (via pikudhaoref) — "
+            f"Starting oref alert monitor — "
             f"polling every {self.poll_interval}s"
         )
-        print(f"🔍 Monitoring oref.org.il for alerts via proxy (every {self.poll_interval}s)...")
+        print(f"🔍 Monitoring oref.org.il for alerts (every {self.poll_interval}s)...")
         print("   Press Ctrl+C to stop.\n")
 
         try:
-            # The client's background thread is already running, so we just block the main thread
             while self._running:
-                time.sleep(1.0)
+                self.poll_once()
+                time.sleep(self.poll_interval)
         except KeyboardInterrupt:
             print("\n⏹ Monitoring stopped.")
             self._running = False
@@ -156,13 +193,8 @@ class OrefClient:
     def stop(self):
         """Stop the polling loop."""
         self._running = False
-        try:
-            self.client.closed = True
-        except:
-            pass
 
 
-# ── Quick test ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
@@ -171,18 +203,14 @@ if __name__ == "__main__":
     def on_alert(event: AlertEvent):
         print(f"\n🚨 ALERT: {event.title}")
         print(f"   Category: {event.category_name}")
-        print(f"   Cities ({event.city_count}): {', '.join(event.cities[:10])}...")
+        print(f"   Cities ({event.city_count}): {', '.join(event.cities[:10])}")
         print()
 
     client.on_alert = on_alert
 
-    # Single poll test
     print("Testing single poll...")
     result = client.fetch_alerts()
     if result:
         print(f"Active alert: {result.title} — {result.city_count} cities")
     else:
         print("No active alert (this is normal in peacetime)")
-
-    print("\nStarting continuous monitoring (press ctrl+c to exit)...")
-    client.start()
